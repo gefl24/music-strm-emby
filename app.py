@@ -5,27 +5,23 @@ import requests
 import logging
 from urllib.parse import quote
 from flask import Flask, redirect, Response
-from p115 import P115FileSystem
+# 🔴 引入 P115Client 用于初始化连接
+from p115 import P115FileSystem, P115Client
 
-# ================= 配置加载 (从环境变量) =================
-# 必须配置
+# ================= 配置加载 =================
 COOKIE = os.environ.get("P115_COOKIE")
 if not COOKIE:
     print("FATAL: P115_COOKIE environment variable is missing!")
     exit(1)
 
-# 可选配置
-SOURCE_DIR = os.environ.get("SOURCE_DIR", "/Music")  # 115网盘中的音乐目录
-OUTPUT_DIR = "/output"                               # 容器内的输出目录
-# 外部访问地址，用于生成 strm 内容 (例如 http://192.168.1.5:8000)
+SOURCE_DIR = os.environ.get("SOURCE_DIR", "/Music")
+OUTPUT_DIR = "/output"
 HOST_URL = os.environ.get("HOST_URL", "http://127.0.0.1:8000").rstrip('/') 
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", 3600))
 
-# 文件类型定义
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.tbn')
 MUSIC_EXTS = ('.mp3', '.flac', '.wav', '.m4a', '.dsf', '.dff', '.ape', '.wma', '.aac')
 
-# 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -36,8 +32,11 @@ def login_115():
     """初始化或重置 115 连接"""
     global fs
     try:
-        # P115FileSystem 自动处理 cookie 保活
-        fs = P115FileSystem(cookie=COOKIE)
+        # 🔴 修正：先创建 Client，再创建 FileSystem
+        # 这样可以确保 cookie 正确传递并验证
+        client = P115Client(cookie=COOKIE)
+        fs = P115FileSystem(client)
+        
         logger.info("115 Login Successful")
         return True
     except Exception as e:
@@ -45,12 +44,11 @@ def login_115():
         return False
 
 def sync_image(file_info, local_dir):
-    """同步图片：仅当大小不同或不存在时下载"""
+    """同步图片"""
     filename = file_info['name']
     local_path = os.path.join(local_dir, filename)
     remote_size = int(file_info.get('size', 0))
     
-    # 检查是否需要下载
     if os.path.exists(local_path):
         if os.path.getsize(local_path) == remote_size:
             return 
@@ -67,7 +65,7 @@ def sync_image(file_info, local_dir):
         logger.error(f"Error downloading image {filename}: {e}")
 
 def create_nfo(filename, local_dir, album_name="Unknown", artist_name="Unknown"):
-    """生成基础 NFO 文件"""
+    """生成 NFO"""
     nfo_name = os.path.splitext(filename)[0] + ".nfo"
     nfo_path = os.path.join(local_dir, nfo_name)
     
@@ -75,7 +73,6 @@ def create_nfo(filename, local_dir, album_name="Unknown", artist_name="Unknown")
         return
 
     title = os.path.splitext(filename)[0]
-    # 简单的 XML 结构
     xml_content = f"""<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <musicvideo>
   <title>{title}</title>
@@ -100,20 +97,16 @@ def scanner_task():
 
         logger.info(f"--- Starting Scan: {SOURCE_DIR} ---")
         try:
-            # 遍历 115 目录
             for root, dirs, files in fs.walk(SOURCE_DIR):
-                # 构造本地相对路径
                 rel_path = os.path.relpath(root, SOURCE_DIR)
                 if rel_path == ".":
                     local_dir = OUTPUT_DIR
                 else:
                     local_dir = os.path.join(OUTPUT_DIR, rel_path)
                 
-                # 确保本地目录结构存在
                 if not os.path.exists(local_dir):
                     os.makedirs(local_dir, exist_ok=True)
 
-                # 尝试从路径中提取元信息 (假设结构: 歌手/专辑/歌曲)
                 album_name = os.path.basename(root)
                 try:
                     artist_name = os.path.basename(os.path.dirname(root))
@@ -124,28 +117,22 @@ def scanner_task():
                     fname = file['name']
                     ext = os.path.splitext(fname)[1].lower()
 
-                    # 1. 图片同步
                     if ext in IMAGE_EXTS:
                         sync_image(file, local_dir)
                     
-                    # 2. 音乐处理
                     elif ext in MUSIC_EXTS:
                         strm_name = os.path.splitext(fname)[0] + ".strm"
                         strm_path = os.path.join(local_dir, strm_name)
                         
-                        # 构造回源 URL: http://HOST/play/PICKCODE/FILENAME
-                        # 对文件名进行 URL 编码，防止特殊字符导致 URL 断裂
                         safe_filename = quote(fname)
                         pickcode = file['pickcode']
                         file_url = f"{HOST_URL}/play/{pickcode}/{safe_filename}"
                         
-                        # 写入 strm
                         if not os.path.exists(strm_path):
                             with open(strm_path, 'w', encoding='utf-8') as f:
                                 f.write(file_url)
                             logger.info(f"Generated: {strm_name}")
                         else:
-                            # 检查内容是否变动 (防止 HOST_URL 变更后文件没更新)
                             with open(strm_path, 'r', encoding='utf-8') as f:
                                 content = f.read()
                             if content != file_url:
@@ -153,13 +140,11 @@ def scanner_task():
                                     f.write(file_url)
                                 logger.info(f"Updated: {strm_name}")
 
-                        # 生成 NFO
                         create_nfo(fname, local_dir, album_name, artist_name)
             
             logger.info("--- Scan Finished ---")
         except Exception as e:
             logger.error(f"Scan Error: {e}")
-            # 遇到严重错误尝试重新登录
             login_115()
 
         time.sleep(SCAN_INTERVAL)
@@ -170,26 +155,17 @@ def index():
 
 @app.route('/play/<pickcode>/<filename>')
 def play_redirect(pickcode, filename):
-    """处理播放请求：获取直链并重定向"""
     global fs
     try:
         if fs is None: login_115()
-        
-        # 获取 115 真实下载链接
         url = fs.get_url(pickcode)
-        
-        # 302 重定向到真实链接
         return redirect(url, code=302)
     except Exception as e:
         logger.error(f"Get Link Error: {e}")
-        # 如果获取失败，可能是 cookie 过期，尝试重登
         login_115()
         return f"Error getting link: {e}", 500
 
 if __name__ == '__main__':
-    # 启动扫描线程
     t = threading.Thread(target=scanner_task, daemon=True)
     t.start()
-    
-    # 启动 Flask 服务
     app.run(host='0.0.0.0', port=8000)
