@@ -187,6 +187,9 @@ def create_nfo(filename, local_dir, album_name="Unknown", artist_name="Unknown")
     except: pass
 
 def scanner_task():
+    # 🔴 修复点：global fs 必须放在函数的第一行
+    global fs 
+    
     while True:
         with lock:
             target_dir = current_config["source_dir"]
@@ -201,9 +204,7 @@ def scanner_task():
         logger.info(f"--- Starting Scan: {target_dir} ---")
         try:
             for root, dirs, files in fs.walk(target_dir):
-                # 计算相对路径
                 rel_path = os.path.relpath(root, target_dir)
-                # 构造本地数据目录: /data/相对路径
                 if rel_path == ".":
                     local_dir = DATA_DIR
                 else:
@@ -244,8 +245,8 @@ def scanner_task():
         except Exception as e:
             logger.error(f"Scan Error: {e}")
             with lock:
-                global fs
-                fs = None # 重置连接
+                # 这里不需要 global fs 了，因为最上面已经声明了
+                fs = None 
         
         time.sleep(interval)
 
