@@ -1,4 +1,4 @@
-# 🟢 必须使用 3.12 (python-115 的硬性要求)
+# 🟢 1. 必须使用 Python 3.12 (该库的硬性要求)
 FROM python:3.12-bookworm
 
 # 设置工作目录
@@ -8,8 +8,7 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 安装编译依赖
-# 这一步非常重要，保留它以确保底层库能编译通过
+# 2. 安装编译依赖 (该库部分组件需要 GCC 编译)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -23,13 +22,14 @@ RUN apt-get update && \
 # 升级 pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# 🟢 核心修正：
-# 1. 环境已是 3.12 -> 解决了 versions: none 问题
-# 2. 包名改回 python-115 -> 解决了 No matching distribution 问题
+# 🟢 3. 核心修正：
+# - 使用国内清华源 (-i ...) 防止网络问题导致找不到包
+# - 包名必须是 "python-115" (代码里 import p115)
 RUN pip install --no-cache-dir --verbose \
     flask \
     requests \
-    python-115
+    python-115 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制核心代码
 COPY app.py .
