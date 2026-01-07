@@ -6,6 +6,8 @@ import requests
 import logging
 from urllib.parse import quote
 from flask import Flask, redirect, request, render_template_string
+
+# 引入 p115client
 from p115client import P115Client
 
 # ================= 路径配置 =================
@@ -25,6 +27,7 @@ current_config = DEFAULT_CONFIG.copy()
 client = None
 lock = threading.Lock()
 
+# HTML 模板
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -122,15 +125,25 @@ def login_115():
     cookie = current_config.get("cookie")
     if not cookie: return False
     try:
-        # 🔴 修复：尝试直接传入 cookie 字符串 (位置参数)
+        # 初始化客户端
         client = P115Client(cookie)
-        logger.info("115 Login Successful (Direct)")
+        
+        # 🔴 关键修复：设置浏览器 User-Agent，欺骗防火墙
+        # 这一步解决了 405 Method Not Allowed 错误
+        client.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
+        logger.info("115 Login Successful (UA Set)")
         return True
     except TypeError:
-        # 备用：尝试使用关键字参数 (新版可能叫 cookies)
         try:
+            # 备用兼容：尝试 cookies 关键字参数
             client = P115Client(cookies=cookie)
-            logger.info("115 Login Successful (Kwargs)")
+            client.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            logger.info("115 Login Successful (Kwargs + UA)")
             return True
         except Exception as e:
             logger.error(f"Login Failed (Kwargs): {e}")
@@ -145,7 +158,8 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        r = requests.get(url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        # 下载图片时也带上 User-Agent
+        r = requests.get(url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(1024*1024):
@@ -160,6 +174,7 @@ def walk_115(cid=0):
         offset = 0
         limit = 1000 
         while True:
+            # 带 UA 的 client 发起请求，应该能通过 WAF
             resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
             if not resp or "data" not in resp: break
             data = resp["data"]
@@ -173,6 +188,7 @@ def walk_115(cid=0):
             if len(data) < limit: break
             offset += limit
     except Exception as e:
+        # 如果还是报错，打印详细信息以便排查
         logger.error(f"Walk error at cid {cid}: {e}")
 
 def create_nfo(filename, local_dir, album_name="Unknown", artist_name="Unknown"):
