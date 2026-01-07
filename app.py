@@ -46,7 +46,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚙️ 115 Strm 服务设置 (WAF修复版)</h2>
+    <h2>⚙️ 115 Strm 服务设置 (WAF终结版)</h2>
     <div class="path-info">
         配置文件: {{ config_path }}<br>
         输出目录: {{ data_path }}
@@ -123,7 +123,6 @@ def login_115():
     cookie = current_config.get("cookie")
     if not cookie: return False
 
-    # 1. 循环外初始化 client (关键修正：避免重试时丢失 Session Cookie)
     temp_client = None
     try:
         try:
@@ -131,14 +130,13 @@ def login_115():
         except TypeError:
             temp_client = P115Client(cookies=cookie, app="web")
         
-        # 设置伪装 Header
+        # 🔴 核心修改 1: 伪装成 115 官方浏览器 (User-Agent 白名单)
+        # 相比普通 Chrome UA，这个更容易通过验证
         fake_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36 115Browser/23.9.3.6",
             "Referer": "https://115.com/",
             "Origin": "https://115.com",
             "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "X-Requested-With": "XMLHttpRequest",
             "Connection": "keep-alive"
         }
         temp_client.headers.update(fake_headers)
@@ -146,30 +144,49 @@ def login_115():
         logger.error(f"Client Init Failed: {e}")
         return False
 
-    # 2. 循环重试验证 (复用同一个 temp_client)
-    for attempt in range(3):
+    # 🔴 核心修改 2: 手动 HTTP 握手 (绕过 p115client 封装)
+    # 我们直接用 session.get 发送请求，这样即使 405 也能拿到 Cookie 并更新 Session
+    for attempt in range(4):
         try:
-            # 发送测试请求
-            temp_client.fs_files({"limit": 1})
+            # 这里的 URL 是随便一个 API，目的是触发 WAF 拿到 acw_tc cookie
+            api_url = "https://web.api.115.com/files?limit=1"
             
-            # 成功！赋值给全局 client
-            client = temp_client
-            logger.info("115 Login Successful (Passed WAF)")
-            return True
+            # 使用底层 session 发送请求，允许 405
+            # requests 会自动处理 response header 里的 Set-Cookie
+            resp = temp_client.session.get(api_url, timeout=10)
             
-        except Exception as e:
-            if "405" in str(e):
-                logger.warning(f"WAF Challenge triggered (Attempt {attempt+1}/3). Retrying in 3s...")
-                # 405 响应会包含 Set-Cookie，Requests Session 会自动处理
-                # 我们只需要等待几秒，用同一个 client 再次发起请求即可
+            if resp.status_code == 200:
+                # 成功！
+                client = temp_client
+                logger.info("115 Login Successful (Direct 200)")
+                return True
+            
+            elif resp.status_code == 405:
+                # 触发了 WAF，但此时 requests session 应该已经获取到了 cookie
+                logger.warning(f"WAF Handshake Triggered (405). Got Cookies: {dict(temp_client.session.cookies)}")
+                logger.info("Sleeping 3s to let WAF register cookie...")
                 time.sleep(3)
-                continue 
+                # 此时 session 里已经有了验证 cookie，下次循环应该就能过
+                continue
+            
             else:
-                logger.error(f"Login Verify Failed: {e}")
-                # 如果是其他错误(如Cookie无效)，重试可能无用，但多试一次无妨
-                time.sleep(1)
-    
-    logger.error("Failed to pass WAF after 3 attempts.")
+                logger.warning(f"Unexpected status code: {resp.status_code}")
+                time.sleep(2)
+
+        except Exception as e:
+            logger.error(f"Handshake Error: {e}")
+            time.sleep(2)
+            
+    # 最后尝试一次正式调用
+    try:
+        temp_client.fs_files({"limit": 1})
+        client = temp_client
+        logger.info("115 Login Successful (Final Check)")
+        return True
+    except:
+        pass
+
+    logger.error("Failed to pass WAF after all attempts.")
     return False
 
 def download_image(pickcode, filename, local_dir):
@@ -178,7 +195,9 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        r = client.session.get(url, stream=True, timeout=30)
+        # 115Browser UA
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36 115Browser/23.9.3.6"}
+        r = client.session.get(url, stream=True, timeout=30, headers=headers)
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(1024*1024):
@@ -188,13 +207,11 @@ def download_image(pickcode, filename, local_dir):
         logger.error(f"Error downloading image {filename}: {e}")
 
 def walk_115(cid=0):
-    """递归遍历 115 目录"""
     try:
         offset = 0
         limit = 1000 
         while True:
             resp = None
-            # 每个 API 请求也增加简单的重试
             for retry in range(3):
                 try:
                     resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
@@ -202,15 +219,17 @@ def walk_115(cid=0):
                 except Exception as e:
                     if "405" in str(e):
                         logger.warning(f"WAF in walk at {cid}, retrying...")
-                        time.sleep(2)
+                        # 405 重试必须等待
+                        time.sleep(3)
+                        # 这里关键：触发一次底层请求以更新 cookie
+                        try: client.session.get("https://web.api.115.com/files?limit=1")
+                        except: pass
                         continue
                     else:
                         logger.error(f"API Error: {e}")
                         break
             
-            if not resp or not isinstance(resp, dict):
-                break
-                
+            if not resp or not isinstance(resp, dict): break
             data = resp.get("data", [])
             if not data: break
 
