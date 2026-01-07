@@ -36,7 +36,7 @@ jobs:
           # 🟢 2. 这里增加 linux/arm64
           platforms: linux/amd64,linux/arm64
           # 请替换为您的 Docker Hub 用户名/镜像名
-          tags: your_dockerhub_username/music-strm-emby:latest
+          tags: geelonn/music-strm-emby:latest
           # 缓存设置，加快二次构建速度
           cache-from: type=gha
           cache-to: type=gha,mode=max
