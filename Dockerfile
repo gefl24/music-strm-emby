@@ -1,11 +1,11 @@
-# 必须使用 Python 3.12 (兼容性最佳)
+# 使用 Python 3.12 (兼容性最佳)
 FROM python:3.12-bookworm
 
 WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 安装编译依赖和 git
+# 安装 Git 和编译环境
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -20,14 +20,14 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir flask requests
 
-# 直接从 GitHub 安装 p115
-# 这能彻底解决 PyPI 上找不到包、包名不对、版本不匹配等所有问题
 RUN pip install --no-cache-dir git+https://github.com/ChenyangGao/p115client.git
 
 COPY app.py .
-RUN mkdir -p /output
 
-# 🔴 暴露 8778 端口
+# 创建分离的目录
+RUN mkdir -p /config /data
+
+# 暴露端口 8778 (Web管理)
 EXPOSE 8778
 
 CMD ["python", "app.py"]
