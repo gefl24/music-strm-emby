@@ -32,4 +32,4 @@ jobs:
           # ▼▼▼ 请修改下面的名称：你的Docker用户名/镜像名 ▼▼▼
           tags: geelonn/music-strm-emby:latest
           # 自动构建 amd64 和 arm64 (适配极空间/群晖/树莓派)
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
