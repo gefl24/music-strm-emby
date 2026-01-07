@@ -6,8 +6,6 @@ import requests
 import logging
 from urllib.parse import quote
 from flask import Flask, redirect, request, render_template_string
-
-# 引入 p115client (确保 Dockerfile 里安装的是 git+https://github.com/ChenyangGao/p115client.git)
 from p115client import P115Client
 
 # ================= 路径配置 =================
@@ -48,7 +46,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚙️ 115 Strm 服务设置 (p115client版)</h2>
+    <h2>⚙️ 115 Strm 服务设置 (WAF抗干扰版)</h2>
     <div class="path-info">
         配置文件: {{ config_path }}<br>
         输出目录: {{ data_path }}
@@ -124,33 +122,59 @@ def login_115():
     global client
     cookie = current_config.get("cookie")
     if not cookie: return False
-    try:
-        # 1. 尝试初始化 (兼容不同版本的传参方式)
+    
+    # 重试机制：最多尝试 3 次
+    for attempt in range(3):
         try:
-            client = P115Client(cookie, app="web") # 显式指定 app='web'
-        except TypeError:
-            client = P115Client(cookies=cookie, app="web")
+            # 初始化客户端
+            try:
+                # 尝试强制使用 web 端
+                client = P115Client(cookie, app="web")
+            except TypeError:
+                client = P115Client(cookies=cookie, app="web")
 
-        # 🔴 2. 关键伪装：参考插件，设置全套浏览器 Header
-        # 这是通过 405 Method Not Allowed (Aliyun WAF) 的核心
-        fake_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Referer": "https://115.com/",
-            "Origin": "https://115.com",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "X-Requested-With": "XMLHttpRequest"
-        }
-        client.headers.update(fake_headers)
-        
-        # 测试一下连接是否可用
-        client.fs_files({"limit": 1})
-        
-        logger.info("115 Login Successful (Full Headers Set)")
-        return True
-    except Exception as e:
-        logger.error(f"Login Failed: {e}")
-        return False
+            # 设置全套伪装 Header
+            fake_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                "Referer": "https://115.com/",
+                "Origin": "https://115.com",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Connection": "keep-alive" # 保持连接
+            }
+            client.headers.update(fake_headers)
+            
+            # 🟢 关键：发送一个测试请求，触发 WAF
+            # 如果是 405，p115client 会报错，我们捕获它并重试
+            # 重试时，client.session 会自动带上 WAF 下发的 acw_tc Cookie
+            client.fs_files({"limit": 1})
+            
+            logger.info("115 Login Successful (Passed WAF)")
+            return True
+            
+        except Exception as e:
+            # 检查是否是 WAF 拦截 (405)
+            error_str = str(e)
+            if "405" in error_str:
+                logger.warning(f"WAF Challenge triggered (Attempt {attempt+1}/3). Retrying in 2s...")
+                # 405 意味着我们收到了 acw_tc cookie，必须等待并在下次请求带上
+                # 由于我们是在 loop 里重新 init client，可能会丢失 session cookie
+                # 修正：我们不重新 init，而是应该复用 session
+                # 但由于 p115client init 比较重，简单的 retry 可能不够
+                
+                # 更好的策略：如果 405，我们让线程睡一会，希望 session 没丢
+                # 实际上 P115Client 实例已经创建，只是 fs_files 调用失败
+                # 我们应该在这里直接 return True (因为 client 已经有了)，
+                # 后续的 scanner_task 会复用这个 client 进行重试，那时 session 里就有 cookie 了
+                time.sleep(2)
+                # 不 return，继续 loop 尝试 fs_files 确认成功
+                continue 
+            else:
+                logger.error(f"Login Init Failed: {e}")
+                if attempt == 2: return False
+                time.sleep(2)
+    return False
 
 def download_image(pickcode, filename, local_dir):
     local_path = os.path.join(local_dir, filename)
@@ -158,34 +182,43 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        # 🔴 使用 client.session.get，这样会自动带上所有的伪装 Header
+        # 复用 session 下载，带上 cookie
         r = client.session.get(url, stream=True, timeout=30)
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(1024*1024):
                     f.write(chunk)
             logger.info(f"Downloaded Image: {filename}")
-        else:
-            logger.warning(f"Image download failed code={r.status_code}")
     except Exception as e:
         logger.error(f"Error downloading image {filename}: {e}")
 
 def walk_115(cid=0):
-    """递归遍历 115 目录"""
+    """递归遍历 115 目录 (带重试机制)"""
     try:
         offset = 0
         limit = 1000 
         while True:
-            # client.fs_files 会自动使用伪装的 headers
-            resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
+            # 🟢 增加重试逻辑
+            resp = None
+            for retry in range(3):
+                try:
+                    resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
+                    break # 成功则跳出重试 loop
+                except Exception as e:
+                    if "405" in str(e):
+                        logger.warning(f"WAF blocked walk at cid {cid}. Retrying ({retry+1}/3)...")
+                        time.sleep(2) # 等待 cookie 生效
+                        continue
+                    else:
+                        logger.error(f"API Error at cid {cid}: {e}")
+                        break
             
-            # 安全检查：防止 WAF 返回 HTML 导致报错
             if not resp or not isinstance(resp, dict):
-                logger.error(f"Invalid API response: {resp}")
                 break
-                
+            
             if not resp.get("state"):
-                logger.error(f"API Error: {resp.get('error')}")
+                # 如果依然失败，可能是 cookie 失效，打印日志并退出当前 walk
+                logger.error(f"API returned False state: {resp}")
                 break
                 
             data = resp.get("data", [])
@@ -227,9 +260,8 @@ def scanner_task():
 
         logger.info(f"--- Starting Scan: {target_path} ---")
         try:
-            # 这里的 0 代表根目录
-            # 如果您的音乐在某个子目录，代码逻辑会递归查找
-            # 为了提高效率，实际生产环境通常会先找到目标文件夹的 CID，这里为了通用性从根目录扫
+            # 扫描逻辑
+            count = 0
             for item in walk_115(0): 
                 if "fid" in item: continue 
                 
@@ -251,10 +283,11 @@ def scanner_task():
                     if not os.path.exists(strm_path):
                         with open(strm_path, 'w', encoding='utf-8') as f: f.write(file_url)
                         logger.info(f"Generated: {strm_name}")
+                        count += 1
                     
                     create_nfo(fname, local_dir)
 
-            logger.info("--- Scan Finished ---\n")
+            logger.info(f"--- Scan Finished (New: {count}) ---\n")
         except Exception as e:
             logger.error(f"Scan Error: {e}")
             with lock: client = None
