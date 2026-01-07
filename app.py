@@ -6,6 +6,8 @@ import requests
 import logging
 from urllib.parse import quote
 from flask import Flask, redirect, request, render_template_string
+
+# 引入 p115client (确保 Dockerfile 里安装的是 git+https://github.com/ChenyangGao/p115client.git)
 from p115client import P115Client
 
 # ================= 路径配置 =================
@@ -25,6 +27,7 @@ current_config = DEFAULT_CONFIG.copy()
 client = None
 lock = threading.Lock()
 
+# HTML 模板
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -45,7 +48,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚙️ 115 Strm 服务设置 (增强防拦截)</h2>
+    <h2>⚙️ 115 Strm 服务设置 (p115client版)</h2>
     <div class="path-info">
         配置文件: {{ config_path }}<br>
         输出目录: {{ data_path }}
@@ -122,14 +125,14 @@ def login_115():
     cookie = current_config.get("cookie")
     if not cookie: return False
     try:
-        # 1. 初始化客户端
+        # 1. 尝试初始化 (兼容不同版本的传参方式)
         try:
-            client = P115Client(cookie)
+            client = P115Client(cookie, app="web") # 显式指定 app='web'
         except TypeError:
-            client = P115Client(cookies=cookie)
+            client = P115Client(cookies=cookie, app="web")
 
-        # 🔴 2. 关键修复：设置完整的浏览器头部，包含 Referer 和 Origin
-        # 这能通过绝大多数 Aliyun WAF 规则
+        # 🔴 2. 关键伪装：参考插件，设置全套浏览器 Header
+        # 这是通过 405 Method Not Allowed (Aliyun WAF) 的核心
         fake_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Referer": "https://115.com/",
@@ -139,6 +142,9 @@ def login_115():
             "X-Requested-With": "XMLHttpRequest"
         }
         client.headers.update(fake_headers)
+        
+        # 测试一下连接是否可用
+        client.fs_files({"limit": 1})
         
         logger.info("115 Login Successful (Full Headers Set)")
         return True
@@ -152,8 +158,7 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        # 🔴 修复：使用 client.session.get
-        # 这样会自动带上前面设置的 User-Agent 和 Referer，防止下载时被拦截
+        # 🔴 使用 client.session.get，这样会自动带上所有的伪装 Header
         r = client.session.get(url, stream=True, timeout=30)
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
@@ -161,7 +166,7 @@ def download_image(pickcode, filename, local_dir):
                     f.write(chunk)
             logger.info(f"Downloaded Image: {filename}")
         else:
-            logger.warning(f"Failed to download image: {r.status_code}")
+            logger.warning(f"Image download failed code={r.status_code}")
     except Exception as e:
         logger.error(f"Error downloading image {filename}: {e}")
 
@@ -171,15 +176,19 @@ def walk_115(cid=0):
         offset = 0
         limit = 1000 
         while True:
-            # client.fs_files 会自动使用 client.headers
+            # client.fs_files 会自动使用伪装的 headers
             resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
-            if not resp or "data" not in resp: 
-                # 如果被拦截，resp 可能不是预期格式，记录下来
-                if resp and 'state' in resp and not resp['state']:
-                    logger.error(f"API Error Response: {resp}")
+            
+            # 安全检查：防止 WAF 返回 HTML 导致报错
+            if not resp or not isinstance(resp, dict):
+                logger.error(f"Invalid API response: {resp}")
                 break
                 
-            data = resp["data"]
+            if not resp.get("state"):
+                logger.error(f"API Error: {resp.get('error')}")
+                break
+                
+            data = resp.get("data", [])
             if not data: break
 
             for item in data:
@@ -216,9 +225,11 @@ def scanner_task():
                 time.sleep(30)
                 continue
 
-        logger.info(f"--- Starting Scan (Native): {target_path} ---")
+        logger.info(f"--- Starting Scan: {target_path} ---")
         try:
-            # 从根目录开始遍历 (cid=0)
+            # 这里的 0 代表根目录
+            # 如果您的音乐在某个子目录，代码逻辑会递归查找
+            # 为了提高效率，实际生产环境通常会先找到目标文件夹的 CID，这里为了通用性从根目录扫
             for item in walk_115(0): 
                 if "fid" in item: continue 
                 
