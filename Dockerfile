@@ -20,8 +20,9 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir flask requests
 
-# 从源码安装 p115
-RUN pip install --no-cache-dir git+https://github.com/ChenyangGao/p115.git
+# 直接从 GitHub 安装 p115
+# 这能彻底解决 PyPI 上找不到包、包名不对、版本不匹配等所有问题
+RUN pip install --no-cache-dir git+https://github.com/ChenyangGao/p115client.git
 
 COPY app.py .
 RUN mkdir -p /output
