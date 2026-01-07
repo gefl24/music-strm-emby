@@ -1,5 +1,5 @@
-# 使用基于 Debian Bookworm 的 Python 3.11 镜像
-FROM python:3.11-bookworm
+# 🟢 关键修改：升级到 Python 3.12 (该库的最低要求)
+FROM python:3.12-bookworm
 
 # 设置工作目录
 WORKDIR /app
@@ -8,7 +8,7 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 安装底层编译依赖 (python-115 可能依赖其中的加解密库)
+# 安装基础编译工具 (防止依赖库缺少 Wheel 包时编译失败)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -22,11 +22,13 @@ RUN apt-get update && \
 # 升级 pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# 分步安装依赖
-RUN pip install --no-cache-dir flask requests
-
-# 🔴 关键修复：包名是 "python-115"，而不是 "p115"
-RUN pip install --no-cache-dir --verbose python-115
+# 安装依赖
+# python-115: 核心库
+# flask, requests: Web服务库
+RUN pip install --no-cache-dir --verbose \
+    flask \
+    requests \
+    python-115
 
 # 复制核心代码
 COPY app.py .
