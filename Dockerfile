@@ -1,4 +1,4 @@
-# 使用 Python 3.12 (满足 p115 的最低版本要求)
+# 🟢 必须使用 3.12 (python-115 的硬性要求)
 FROM python:3.12-bookworm
 
 # 设置工作目录
@@ -8,8 +8,8 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 安装基础编译工具
-# 这些库是 p115 底层依赖 (如 pycryptodomex) 编译所必须的
+# 安装编译依赖
+# 这一步非常重要，保留它以确保底层库能编译通过
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -23,12 +23,13 @@ RUN apt-get update && \
 # 升级 pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# 🟢 修正：包名改回 p115
-# 环境已经是 Python 3.12 且有了编译工具，这次 p115 一定能安装成功
+# 🟢 核心修正：
+# 1. 环境已是 3.12 -> 解决了 versions: none 问题
+# 2. 包名改回 python-115 -> 解决了 No matching distribution 问题
 RUN pip install --no-cache-dir --verbose \
     flask \
     requests \
-    p115
+    python-115
 
 # 复制核心代码
 COPY app.py .
