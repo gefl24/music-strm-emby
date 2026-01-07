@@ -2,8 +2,8 @@ name: Docker Build and Push
 
 on:
   push:
-    branches: [ "main" ] # 监听 main 分支的变动
-  workflow_dispatch:      # 允许手动触发
+    branches: [ "main" ] # 监听 main 分支
+  workflow_dispatch:      # 允许手动点击按钮触发
 
 jobs:
   build:
@@ -12,24 +12,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      # 🟢 1. 设置 QEMU (关键：用于支持 ARM64 模拟构建)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
 
+      # 2. 设置 Docker Buildx (支持多架构构建的工具)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
+      # 3. 登录 Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 4. 构建并推送
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          # ▼▼▼ 请修改下面的名称：你的Docker用户名/镜像名 ▼▼▼
-          tags: geelonn/music-strm-emby:latest
-          # 自动构建 amd64 和 arm64 (适配极空间/群晖/树莓派)
-          platforms: linux/amd64
+          # 🟢 2. 这里增加 linux/arm64
+          platforms: linux/amd64,linux/arm64
+          # 请替换为您的 Docker Hub 用户名/镜像名
+          tags: your_dockerhub_username/music-strm-emby:latest
+          # 缓存设置，加快二次构建速度
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
