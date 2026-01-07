@@ -6,8 +6,6 @@ import requests
 import logging
 from urllib.parse import quote
 from flask import Flask, redirect, request, render_template_string
-
-# 引入 p115client
 from p115client import P115Client
 
 # ================= 路径配置 =================
@@ -27,7 +25,6 @@ current_config = DEFAULT_CONFIG.copy()
 client = None
 lock = threading.Lock()
 
-# HTML 模板
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -48,7 +45,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚙️ 115 Strm 服务设置 (p115client版)</h2>
+    <h2>⚙️ 115 Strm 服务设置 (增强防拦截)</h2>
     <div class="path-info">
         配置文件: {{ config_path }}<br>
         输出目录: {{ data_path }}
@@ -125,29 +122,26 @@ def login_115():
     cookie = current_config.get("cookie")
     if not cookie: return False
     try:
-        # 初始化客户端
-        client = P115Client(cookie)
-        
-        # 🔴 关键修复：设置浏览器 User-Agent，欺骗防火墙
-        # 这一步解决了 405 Method Not Allowed 错误
-        client.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-        
-        logger.info("115 Login Successful (UA Set)")
-        return True
-    except TypeError:
+        # 1. 初始化客户端
         try:
-            # 备用兼容：尝试 cookies 关键字参数
+            client = P115Client(cookie)
+        except TypeError:
             client = P115Client(cookies=cookie)
-            client.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            })
-            logger.info("115 Login Successful (Kwargs + UA)")
-            return True
-        except Exception as e:
-            logger.error(f"Login Failed (Kwargs): {e}")
-            return False
+
+        # 🔴 2. 关键修复：设置完整的浏览器头部，包含 Referer 和 Origin
+        # 这能通过绝大多数 Aliyun WAF 规则
+        fake_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Referer": "https://115.com/",
+            "Origin": "https://115.com",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        client.headers.update(fake_headers)
+        
+        logger.info("115 Login Successful (Full Headers Set)")
+        return True
     except Exception as e:
         logger.error(f"Login Failed: {e}")
         return False
@@ -158,13 +152,16 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        # 下载图片时也带上 User-Agent
-        r = requests.get(url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+        # 🔴 修复：使用 client.session.get
+        # 这样会自动带上前面设置的 User-Agent 和 Referer，防止下载时被拦截
+        r = client.session.get(url, stream=True, timeout=30)
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(1024*1024):
                     f.write(chunk)
             logger.info(f"Downloaded Image: {filename}")
+        else:
+            logger.warning(f"Failed to download image: {r.status_code}")
     except Exception as e:
         logger.error(f"Error downloading image {filename}: {e}")
 
@@ -174,9 +171,14 @@ def walk_115(cid=0):
         offset = 0
         limit = 1000 
         while True:
-            # 带 UA 的 client 发起请求，应该能通过 WAF
+            # client.fs_files 会自动使用 client.headers
             resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
-            if not resp or "data" not in resp: break
+            if not resp or "data" not in resp: 
+                # 如果被拦截，resp 可能不是预期格式，记录下来
+                if resp and 'state' in resp and not resp['state']:
+                    logger.error(f"API Error Response: {resp}")
+                break
+                
             data = resp["data"]
             if not data: break
 
@@ -188,7 +190,6 @@ def walk_115(cid=0):
             if len(data) < limit: break
             offset += limit
     except Exception as e:
-        # 如果还是报错，打印详细信息以便排查
         logger.error(f"Walk error at cid {cid}: {e}")
 
 def create_nfo(filename, local_dir, album_name="Unknown", artist_name="Unknown"):
