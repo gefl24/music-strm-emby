@@ -1,7 +1,5 @@
-# 🔴 关键修改：使用 python:3.9-bullseye (完整版)
-# 这是一个基于 Debian 的完整系统，内置 GCC、Rust、OpenSSL 等所有编译环境
-# 虽然体积较大，但能保证 100% 构建成功
-FROM python:3.9-bullseye
+# 使用 Python 3.10 官方镜像 (稳定，兼容性好)
+FROM python:3.10
 
 # 设置工作目录
 WORKDIR /app
@@ -10,14 +8,14 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 复制依赖文件
-COPY requirements.txt .
-
-# 🔴 安装依赖
-# 这里不需要再手动安装 gcc 了，直接安装 python 库
-# 增加 --default-timeout 防止网络波动导致报错
+# 🔴 关键修改：直接安装库，不再读取 requirements.txt
+# 这样可以彻底避免 Windows 换行符(\r\n) 导致的解析错误
+# 同时加上 --verbose 以便如果再次出错能看到具体原因
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+    pip install --no-cache-dir --verbose \
+    flask \
+    requests \
+    p115
 
 # 复制核心代码
 COPY app.py .
