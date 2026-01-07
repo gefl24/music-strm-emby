@@ -46,7 +46,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚙️ 115 Strm 服务设置 (WAF抗干扰版)</h2>
+    <h2>⚙️ 115 Strm 服务设置 (WAF修复版)</h2>
     <div class="path-info">
         配置文件: {{ config_path }}<br>
         输出目录: {{ data_path }}
@@ -122,58 +122,54 @@ def login_115():
     global client
     cookie = current_config.get("cookie")
     if not cookie: return False
-    
-    # 重试机制：最多尝试 3 次
+
+    # 1. 循环外初始化 client (关键修正：避免重试时丢失 Session Cookie)
+    temp_client = None
+    try:
+        try:
+            temp_client = P115Client(cookie, app="web")
+        except TypeError:
+            temp_client = P115Client(cookies=cookie, app="web")
+        
+        # 设置伪装 Header
+        fake_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Referer": "https://115.com/",
+            "Origin": "https://115.com",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Connection": "keep-alive"
+        }
+        temp_client.headers.update(fake_headers)
+    except Exception as e:
+        logger.error(f"Client Init Failed: {e}")
+        return False
+
+    # 2. 循环重试验证 (复用同一个 temp_client)
     for attempt in range(3):
         try:
-            # 初始化客户端
-            try:
-                # 尝试强制使用 web 端
-                client = P115Client(cookie, app="web")
-            except TypeError:
-                client = P115Client(cookies=cookie, app="web")
-
-            # 设置全套伪装 Header
-            fake_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-                "Referer": "https://115.com/",
-                "Origin": "https://115.com",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "X-Requested-With": "XMLHttpRequest",
-                "Connection": "keep-alive" # 保持连接
-            }
-            client.headers.update(fake_headers)
+            # 发送测试请求
+            temp_client.fs_files({"limit": 1})
             
-            # 🟢 关键：发送一个测试请求，触发 WAF
-            # 如果是 405，p115client 会报错，我们捕获它并重试
-            # 重试时，client.session 会自动带上 WAF 下发的 acw_tc Cookie
-            client.fs_files({"limit": 1})
-            
+            # 成功！赋值给全局 client
+            client = temp_client
             logger.info("115 Login Successful (Passed WAF)")
             return True
             
         except Exception as e:
-            # 检查是否是 WAF 拦截 (405)
-            error_str = str(e)
-            if "405" in error_str:
-                logger.warning(f"WAF Challenge triggered (Attempt {attempt+1}/3). Retrying in 2s...")
-                # 405 意味着我们收到了 acw_tc cookie，必须等待并在下次请求带上
-                # 由于我们是在 loop 里重新 init client，可能会丢失 session cookie
-                # 修正：我们不重新 init，而是应该复用 session
-                # 但由于 p115client init 比较重，简单的 retry 可能不够
-                
-                # 更好的策略：如果 405，我们让线程睡一会，希望 session 没丢
-                # 实际上 P115Client 实例已经创建，只是 fs_files 调用失败
-                # 我们应该在这里直接 return True (因为 client 已经有了)，
-                # 后续的 scanner_task 会复用这个 client 进行重试，那时 session 里就有 cookie 了
-                time.sleep(2)
-                # 不 return，继续 loop 尝试 fs_files 确认成功
+            if "405" in str(e):
+                logger.warning(f"WAF Challenge triggered (Attempt {attempt+1}/3). Retrying in 3s...")
+                # 405 响应会包含 Set-Cookie，Requests Session 会自动处理
+                # 我们只需要等待几秒，用同一个 client 再次发起请求即可
+                time.sleep(3)
                 continue 
             else:
-                logger.error(f"Login Init Failed: {e}")
-                if attempt == 2: return False
-                time.sleep(2)
+                logger.error(f"Login Verify Failed: {e}")
+                # 如果是其他错误(如Cookie无效)，重试可能无用，但多试一次无妨
+                time.sleep(1)
+    
+    logger.error("Failed to pass WAF after 3 attempts.")
     return False
 
 def download_image(pickcode, filename, local_dir):
@@ -182,7 +178,6 @@ def download_image(pickcode, filename, local_dir):
     
     try:
         url = client.download_url(pickcode)
-        # 复用 session 下载，带上 cookie
         r = client.session.get(url, stream=True, timeout=30)
         if r.status_code == 200:
             with open(local_path, 'wb') as f:
@@ -193,32 +188,27 @@ def download_image(pickcode, filename, local_dir):
         logger.error(f"Error downloading image {filename}: {e}")
 
 def walk_115(cid=0):
-    """递归遍历 115 目录 (带重试机制)"""
+    """递归遍历 115 目录"""
     try:
         offset = 0
         limit = 1000 
         while True:
-            # 🟢 增加重试逻辑
             resp = None
+            # 每个 API 请求也增加简单的重试
             for retry in range(3):
                 try:
                     resp = client.fs_files({"cid": cid, "offset": offset, "limit": limit})
-                    break # 成功则跳出重试 loop
+                    break
                 except Exception as e:
                     if "405" in str(e):
-                        logger.warning(f"WAF blocked walk at cid {cid}. Retrying ({retry+1}/3)...")
-                        time.sleep(2) # 等待 cookie 生效
+                        logger.warning(f"WAF in walk at {cid}, retrying...")
+                        time.sleep(2)
                         continue
                     else:
-                        logger.error(f"API Error at cid {cid}: {e}")
+                        logger.error(f"API Error: {e}")
                         break
             
             if not resp or not isinstance(resp, dict):
-                break
-            
-            if not resp.get("state"):
-                # 如果依然失败，可能是 cookie 失效，打印日志并退出当前 walk
-                logger.error(f"API returned False state: {resp}")
                 break
                 
             data = resp.get("data", [])
@@ -260,7 +250,6 @@ def scanner_task():
 
         logger.info(f"--- Starting Scan: {target_path} ---")
         try:
-            # 扫描逻辑
             count = 0
             for item in walk_115(0): 
                 if "fid" in item: continue 
