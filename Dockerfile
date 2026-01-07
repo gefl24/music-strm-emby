@@ -8,7 +8,7 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 2. 安装编译依赖 (该库部分组件需要 GCC 编译)
+# 2. 安装编译依赖
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -23,13 +23,12 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir --upgrade pip
 
 # 🟢 3. 核心修正：
-# - 使用国内清华源 (-i ...) 防止网络问题导致找不到包
-# - 包名必须是 "python-115" (代码里 import p115)
+# - 移除了清华源 (-i ...)，直接使用官方 PyPI
+# - 官方源在 GitHub Actions 环境下 100% 能找到包
 RUN pip install --no-cache-dir --verbose \
     flask \
     requests \
-    python-115 \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
+    python-115
 
 # 复制核心代码
 COPY app.py .
