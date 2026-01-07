@@ -8,10 +8,15 @@ from urllib.parse import quote
 from flask import Flask, redirect, request, render_template_string
 from p115 import P115FileSystem, P115Client
 
-# ================= 全局配置管理 =================
-CONFIG_FILE = "/output/config.json"
+# ================= 路径配置 (容器内绝对路径) =================
+# 1. 配置文件路径
+CONFIG_DIR = "/config"
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-# 默认配置
+# 2. STRM 输出根目录
+DATA_DIR = "/data"
+
+# ================= 默认配置 =================
 DEFAULT_CONFIG = {
     "cookie": os.environ.get("P115_COOKIE", ""),
     # 默认主机地址使用 8777 (播放端口)
@@ -41,35 +46,48 @@ HTML_TEMPLATE = """
         .alert { padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
         .success { background-color: #d4edda; color: #155724; }
         .status { margin-bottom: 20px; padding: 10px; background: #f8f9fa; border-left: 5px solid #007bff; }
+        .path-info { background: #eee; padding: 10px; font-size: 0.9rem; border-radius: 4px; margin-bottom: 20px;}
     </style>
 </head>
 <body>
     <h2>⚙️ 115 Strm 服务设置</h2>
+    
+    <div class="path-info">
+        配置文件: {{ config_path }}<br>
+        输出目录: {{ data_path }}
+    </div>
+
     <div class="status">
         当前状态: <strong>{{ status }}</strong><br>
         扫描目标: {{ config.source_dir }}
     </div>
+
     {% if message %}
     <div class="alert success">{{ message }}</div>
     {% endif %}
+
     <form method="POST" action="/admin/save">
         <div class="form-group">
             <label>115 Cookie (UID; CID; SEID)</label>
             <input type="text" name="cookie" value="{{ config.cookie }}" required placeholder="UID=...;CID=...;SEID=...">
         </div>
+        
         <div class="form-group">
             <label>本机局域网地址 (Host URL)</label>
             <input type="text" name="host_url" value="{{ config.host_url }}" required placeholder="http://192.168.XX.XX:8777">
             <small style="color:gray">请填写 NAS IP + 8777 端口</small>
         </div>
+
         <div class="form-group">
             <label>115 音乐目录 (Source Dir)</label>
             <input type="text" name="source_dir" value="{{ config.source_dir }}" required>
         </div>
+
         <div class="form-group">
             <label>扫描间隔 (秒)</label>
             <input type="number" name="scan_interval" value="{{ config.scan_interval }}" required>
         </div>
+
         <button type="submit">保存并应用</button>
     </form>
 </body>
@@ -84,19 +102,30 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+def ensure_directories():
+    """确保必要的目录存在"""
+    if not os.path.exists(CONFIG_DIR):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR, exist_ok=True)
+
 def load_config():
     global current_config
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                current_config.update(json.load(f))
-            logger.info("Loaded config from file.")
+                saved = json.load(f)
+                current_config.update(saved)
+            logger.info(f"Loaded config from {CONFIG_FILE}")
         except Exception as e:
             logger.error(f"Error loading config file: {e}")
+    else:
+        logger.info("Using default config (env vars)")
 
 def save_config(new_config):
     global current_config
     try:
+        ensure_directories()
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_config, f, indent=4)
         current_config = new_config
@@ -111,6 +140,7 @@ def login_115():
     cookie = current_config.get("cookie")
     if not cookie: return False
     try:
+        # 使用 P115Client 登录
         client = P115Client(cookie=cookie)
         fs = P115FileSystem(client)
         logger.info("115 Login Successful")
@@ -123,7 +153,10 @@ def sync_image(file_info, local_dir):
     filename = file_info['name']
     local_path = os.path.join(local_dir, filename)
     remote_size = int(file_info.get('size', 0))
-    if os.path.exists(local_path) and os.path.getsize(local_path) == remote_size: return
+    
+    if os.path.exists(local_path):
+        if os.path.getsize(local_path) == remote_size:
+            return 
     
     try:
         url = fs.get_url(file_info['pickcode'])
@@ -168,9 +201,16 @@ def scanner_task():
         logger.info(f"--- Starting Scan: {target_dir} ---")
         try:
             for root, dirs, files in fs.walk(target_dir):
+                # 计算相对路径
                 rel_path = os.path.relpath(root, target_dir)
-                local_dir = "/output" if rel_path == "." else os.path.join("/output", rel_path)
-                if not os.path.exists(local_dir): os.makedirs(local_dir, exist_ok=True)
+                # 构造本地数据目录: /data/相对路径
+                if rel_path == ".":
+                    local_dir = DATA_DIR
+                else:
+                    local_dir = os.path.join(DATA_DIR, rel_path)
+                
+                if not os.path.exists(local_dir):
+                    os.makedirs(local_dir, exist_ok=True)
 
                 album_name = os.path.basename(root)
                 artist_name = "Unknown"
@@ -180,6 +220,7 @@ def scanner_task():
                 for file in files:
                     fname = file['name']
                     ext = os.path.splitext(fname)[1].lower()
+
                     if ext in IMAGE_EXTS:
                         sync_image(file, local_dir)
                     elif ext in MUSIC_EXTS:
@@ -196,14 +237,19 @@ def scanner_task():
                             if content != file_url:
                                 with open(strm_path, 'w', encoding='utf-8') as f: f.write(file_url)
                                 logger.info(f"Updated URL: {strm_name}")
+                        
                         create_nfo(fname, local_dir, album_name, artist_name)
+            
             logger.info("--- Scan Finished ---\n")
         except Exception as e:
             logger.error(f"Scan Error: {e}")
             with lock:
                 global fs
-                fs = None 
+                fs = None # 重置连接
+        
         time.sleep(interval)
+
+# ================= Web 路由 =================
 
 @app.route('/')
 def index(): return redirect('/admin')
@@ -211,7 +257,7 @@ def index(): return redirect('/admin')
 @app.route('/admin')
 def admin_page():
     status = "✅ 运行中" if fs else "⚠️ 未连接 (请检查Cookie)"
-    return render_template_string(HTML_TEMPLATE, config=current_config, status=status)
+    return render_template_string(HTML_TEMPLATE, config=current_config, status=status, config_path=CONFIG_FILE, data_path=DATA_DIR)
 
 @app.route('/admin/save', methods=['POST'])
 def admin_save():
@@ -222,10 +268,12 @@ def admin_save():
         "source_dir": request.form.get('source_dir'),
         "scan_interval": int(request.form.get('scan_interval'))
     }
+    
     with lock:
         save_config(new_config)
-        fs = None 
-    return render_template_string(HTML_TEMPLATE, config=new_config, status="⏳ 重连中...", message="配置已保存！")
+        fs = None # 强制重新登录
+    
+    return render_template_string(HTML_TEMPLATE, config=new_config, status="⏳ 重连中...", message="配置已保存！", config_path=CONFIG_FILE, data_path=DATA_DIR)
 
 @app.route('/play/<pickcode>/<filename>')
 def play_redirect(pickcode, filename):
@@ -240,8 +288,9 @@ def play_redirect(pickcode, filename):
         return f"Error: {e}", 500
 
 if __name__ == '__main__':
+    ensure_directories()
     load_config()
     t = threading.Thread(target=scanner_task, daemon=True)
     t.start()
-    # 🔴 监听 8778 端口
+    # 监听 8778 (Web管理)
     app.run(host='0.0.0.0', port=8778)
